@@ -17,7 +17,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSlider, QGroupBox, QGridLayout, QComboBox,
-    QSplitter, QFrame, QSizePolicy, QToolTip
+    QSplitter, QFrame, QSizePolicy, QToolTip, QFileDialog, QMenu, QAction
 )
 from PyQt5.QtCore import Qt, QTimer, QPoint
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QPen, QCursor
@@ -314,7 +314,7 @@ class VideoWidget(QLabel):
         pixmap = QPixmap.fromImage(qimg)
 
         # Scale to fit widget
-        scaled = pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.FastTransformation)
         self._scale = scaled.width() / w
         self._offset_x = (self.width() - scaled.width()) // 2
         self._offset_y = (self.height() - scaled.height()) // 2
@@ -359,49 +359,61 @@ class VideoWidget(QLabel):
 # Graph Widget
 # ──────────────────────────────────────────────
 class GraphWidget(FigureCanvas):
-    """Embedded matplotlib canvas showing kinematics graphs."""
+    """Embedded matplotlib canvas showing kinematics graphs with export support."""
 
     def __init__(self, parent=None):
-        self.fig = Figure(figsize=(5, 6), dpi=100)
+        self.fig = Figure(figsize=(5, 8), dpi=100)
         self.fig.set_facecolor("#1e1e2e")
         super().__init__(self.fig)
         self.setParent(parent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.axes = []
         self._vlines = []
+        self._plot_data = {}  # store plot data for export
+        self._marker_name = None
+        self._joint_name = None
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
     def plot_kinematics(self, marker_name, time_m, kin, joint_name, ang_kin, time_mot, current_frame):
-        """Plot X/Y velocity, X/Y acceleration, angular velocity, angular acceleration."""
+        """Plot velocity, speed, acceleration, total accel, angular vel, angular accel."""
         self.fig.clear()
         self.axes = []
         self._vlines = []
+        self._marker_name = marker_name
+        self._joint_name = joint_name
+        self._plot_data = {}  # reset
 
         current_time = time_m[current_frame] if current_frame < len(time_m) else time_m[-1]
 
         has_angular = joint_name and joint_name in ang_kin
         n_plots = 4 if has_angular else 2
 
-        # Plot 1: X & Y Velocity
+        # Plot 1: Velocity (Vx, Vy, Total Speed)
         ax1 = self.fig.add_subplot(n_plots, 1, 1)
-        ax1.plot(time_m, kin["vx"], color="#89b4fa", alpha=0.9, linewidth=1.2, label="Vx")
-        ax1.plot(time_m, kin["vy"], color="#a6e3a1", alpha=0.9, linewidth=1.2, label="Vy")
+        ax1.plot(time_m, kin["vx"], color="#89b4fa", alpha=0.9, linewidth=1.0, label="Vx")
+        ax1.plot(time_m, kin["vy"], color="#a6e3a1", alpha=0.9, linewidth=1.0, label="Vy")
+        ax1.plot(time_m, kin["speed"], color="#94e2d5", alpha=0.9, linewidth=1.4, label="Speed", linestyle="-")
         vl = ax1.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
         self._vlines.append(vl)
         ax1.set_ylabel("Velocity (m/s)", fontsize=8)
-        ax1.set_title(f"{marker_name} - Linear Velocity", fontsize=9, color="white", pad=4)
+        ax1.set_title(f"{marker_name} - Velocity", fontsize=9, color="white", pad=4)
         ax1.legend(fontsize=7, loc="upper right", framealpha=0.3)
         self._style_axis(ax1)
+        self._plot_data["Velocity"] = {"Time (s)": time_m, "Vx (m/s)": kin["vx"], "Vy (m/s)": kin["vy"], "Speed (m/s)": kin["speed"]}
 
-        # Plot 2: X & Y Acceleration
+        # Plot 2: Acceleration (Ax, Ay, Total Accel)
         ax2 = self.fig.add_subplot(n_plots, 1, 2)
-        ax2.plot(time_m, kin["ax"], color="#f38ba8", alpha=0.9, linewidth=1.2, label="Ax")
-        ax2.plot(time_m, kin["ay"], color="#fab387", alpha=0.9, linewidth=1.2, label="Ay")
+        ax2.plot(time_m, kin["ax"], color="#f38ba8", alpha=0.9, linewidth=1.0, label="Ax")
+        ax2.plot(time_m, kin["ay"], color="#fab387", alpha=0.9, linewidth=1.0, label="Ay")
+        ax2.plot(time_m, kin["accel"], color="#eba0ac", alpha=0.9, linewidth=1.4, label="Total", linestyle="-")
         vl = ax2.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
         self._vlines.append(vl)
-        ax2.set_ylabel("Accel (m/s^2)", fontsize=8)
-        ax2.set_title(f"{marker_name} - Linear Acceleration", fontsize=9, color="white", pad=4)
+        ax2.set_ylabel("Accel (m/s²)", fontsize=8)
+        ax2.set_title(f"{marker_name} - Acceleration", fontsize=9, color="white", pad=4)
         ax2.legend(fontsize=7, loc="upper right", framealpha=0.3)
         self._style_axis(ax2)
+        self._plot_data["Acceleration"] = {"Time (s)": time_m, "Ax (m/s²)": kin["ax"], "Ay (m/s²)": kin["ay"], "Total Accel (m/s²)": kin["accel"]}
 
         all_axes = [ax1, ax2]
 
@@ -418,6 +430,9 @@ class GraphWidget(FigureCanvas):
             ax3.set_title(f"{joint_name.title()} - Angular Velocity", fontsize=9, color="white", pad=4)
             self._style_axis(ax3)
             all_axes.append(ax3)
+            self._plot_data["Angular Velocity"] = {
+                "Time (s)": time_mot[:n], "Angular Velocity (deg/s)": ang_kin[joint_name]["omega"][:n]
+            }
 
             # Plot 4: Angular Acceleration
             ax4 = self.fig.add_subplot(n_plots, 1, 4)
@@ -425,14 +440,17 @@ class GraphWidget(FigureCanvas):
                      color="#f9e2af", alpha=0.9, linewidth=1.2)
             vl = ax4.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
             self._vlines.append(vl)
-            ax4.set_ylabel("Ang Acc (deg/s^2)", fontsize=8)
+            ax4.set_ylabel("Ang Accel (deg/s²)", fontsize=8)
             ax4.set_title(f"{joint_name.title()} - Angular Acceleration", fontsize=9, color="white", pad=4)
             self._style_axis(ax4)
             all_axes.append(ax4)
+            self._plot_data["Angular Acceleration"] = {
+                "Time (s)": time_mot[:n], "Angular Acceleration (deg/s²)": ang_kin[joint_name]["alpha"][:n]
+            }
 
         all_axes[-1].set_xlabel("Time (s)", fontsize=8)
         self.axes = all_axes
-        self.fig.tight_layout(pad=1.0, h_pad=0.8)
+        self.fig.tight_layout(pad=1.0, h_pad=0.5)
         self.draw()
 
     def update_vline(self, time_val):
@@ -440,6 +458,147 @@ class GraphWidget(FigureCanvas):
         for vl in self._vlines:
             vl.set_xdata([time_val, time_val])
         self.draw_idle()
+
+    def _show_context_menu(self, pos):
+        """Right-click context menu with per-subplot export options."""
+        if not self._plot_data:
+            return
+
+        # Determine which subplot was clicked
+        clicked_ax = None
+        clicked_section = None
+        # Convert widget pos to figure coordinates
+        x, y = pos.x(), pos.y()
+        for ax, section in zip(self.axes, self._plot_data.keys()):
+            bbox = ax.get_window_extent().transformed(self.fig.dpi_scale_trans.inverted())
+            # Convert figure inches to widget pixels
+            fig_dpi = self.fig.dpi
+            ax_left = bbox.x0 * fig_dpi
+            ax_bottom = self.fig.get_figheight() * fig_dpi - bbox.y1 * fig_dpi
+            ax_right = bbox.x1 * fig_dpi
+            ax_top = self.fig.get_figheight() * fig_dpi - bbox.y0 * fig_dpi
+            if ax_left <= x <= ax_right and ax_bottom <= y <= ax_top:
+                clicked_ax = ax
+                clicked_section = section
+                break
+
+        if not clicked_section:
+            return
+
+        cols = self._plot_data[clicked_section]
+        # Separate time from data columns
+        time_key = list(cols.keys())[0]  # first column is always time
+        data_keys = [k for k in cols.keys() if k != time_key]
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #313244; color: #cdd6f4; border: 1px solid #585b70; } "
+            "QMenu::item:selected { background-color: #585b70; }"
+        )
+
+        # Per-series graph export
+        if len(data_keys) == 1:
+            act = menu.addAction(f"Export \"{data_keys[0]}\" Graph...")
+            act.triggered.connect(lambda checked, s=clicked_section, k=data_keys[0]: self._export_single_graph(s, k))
+        else:
+            sub_menu = menu.addMenu(f"Export Individual Graphs")
+            for dk in data_keys:
+                act = sub_menu.addAction(f"{dk}")
+                act.triggered.connect(lambda checked, s=clicked_section, k=dk: self._export_single_graph(s, k))
+            # Also an "export all overlaid" option
+            act_all = menu.addAction(f"Export \"{clicked_section}\" Combined Graph...")
+            act_all.triggered.connect(lambda checked, s=clicked_section: self._export_subplot_image(s))
+
+        menu.addSeparator()
+
+        # CSV export for this subplot
+        act_csv = menu.addAction(f"Export \"{clicked_section}\" Data as CSV...")
+        act_csv.triggered.connect(lambda checked, s=clicked_section: self._export_subplot_csv(s))
+
+        menu.exec_(self.mapToGlobal(pos))
+
+    def _export_single_graph(self, section, data_key):
+        """Export a single data series as its own graph image."""
+        cols = self._plot_data[section]
+        time_key = list(cols.keys())[0]
+        time_arr = cols[time_key]
+        values = cols[data_key]
+
+        safe_name = data_key.split(" (")[0].replace(" ", "_").replace("/", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save {data_key} Graph",
+            f"{self._marker_name}_{safe_name}.png",
+            "PNG Image (*.png);;SVG Image (*.svg);;PDF (*.pdf)"
+        )
+        if not path:
+            return
+
+        from matplotlib.figure import Figure as Fig
+        fig = Fig(figsize=(8, 3), dpi=150)
+        fig.set_facecolor("white")
+        ax = fig.add_subplot(1, 1, 1)
+        ax.plot(time_arr, values, color="#2563eb", linewidth=1.2)
+        ax.set_xlabel("Time (s)", fontsize=9)
+        ax.set_ylabel(data_key, fontsize=9)
+        ax.set_title(f"{self._marker_name} - {data_key}", fontsize=10)
+        ax.set_facecolor("#f8f9fa")
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.3, color="#ccc")
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
+
+    def _export_subplot_image(self, section):
+        """Export the combined subplot (all series overlaid) as an image."""
+        cols = self._plot_data[section]
+        time_key = list(cols.keys())[0]
+        time_arr = cols[time_key]
+        data_keys = [k for k in cols.keys() if k != time_key]
+        colors = ["#2563eb", "#16a34a", "#0891b2", "#dc2626", "#ea580c", "#7c3aed"]
+
+        safe_name = section.replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save {section} Graph",
+            f"{self._marker_name}_{safe_name}.png",
+            "PNG Image (*.png);;SVG Image (*.svg);;PDF (*.pdf)"
+        )
+        if not path:
+            return
+
+        from matplotlib.figure import Figure as Fig
+        fig = Fig(figsize=(8, 3), dpi=150)
+        fig.set_facecolor("white")
+        ax = fig.add_subplot(1, 1, 1)
+        for i, dk in enumerate(data_keys):
+            ax.plot(time_arr, cols[dk], color=colors[i % len(colors)], linewidth=1.2, label=dk.split(" (")[0])
+        ax.set_xlabel("Time (s)", fontsize=9)
+        ax.set_ylabel(section, fontsize=9)
+        ax.set_title(f"{self._marker_name} - {section}", fontsize=10)
+        ax.legend(fontsize=8)
+        ax.set_facecolor("#f8f9fa")
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.3, color="#ccc")
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, facecolor="white", bbox_inches="tight")
+
+    def _export_subplot_csv(self, section):
+        """Export a single subplot's data as CSV."""
+        cols = self._plot_data[section]
+        safe_name = section.replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save {section} Data",
+            f"{self._marker_name}_{safe_name}.csv",
+            "CSV Files (*.csv)"
+        )
+        if not path:
+            return
+        import csv
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            headers = list(cols.keys())
+            writer.writerow(headers)
+            arrays = [cols[h] for h in headers]
+            for row_i in range(len(arrays[0])):
+                writer.writerow([f"{a[row_i]:.6f}" for a in arrays])
 
     def _style_axis(self, ax):
         ax.set_facecolor("#2a2a3e")
@@ -465,12 +624,30 @@ class BiomechanicsGUI(QMainWindow):
         # Load data
         self._load_data()
 
-        # Video capture
-        self.cap = cv2.VideoCapture(str(VIDEO_FILE))
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.video_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        # Pre-load ALL video frames into RAM (video is small)
+        cap = cv2.VideoCapture(str(VIDEO_FILE))
+        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.video_fps = cap.get(cv2.CAP_PROP_FPS)
+        self.frames = []
+        while True:
+            ret, f = cap.read()
+            if not ret:
+                break
+            self.frames.append(f)
+        cap.release()
+        self.total_frames = len(self.frames)
+
         self.current_frame_idx = 0
         self.is_playing = False
+        self._playback_tick = 0  # for throttling updates
+
+        # Pre-compute marker pixel positions as numpy arrays for fast lookup
+        nf = self.n_frames_px
+        self._marker_xy = {}  # marker -> (N,2) int32 array
+        for m in self.marker_names:
+            xy = np.column_stack([self.pos_px[m]["x"][:nf],
+                                  self.pos_px[m]["y"][:nf]]).astype(np.int32)
+            self._marker_xy[m] = xy
 
         # Timer for playback
         self.timer = QTimer()
@@ -481,6 +658,10 @@ class BiomechanicsGUI(QMainWindow):
         self.graph_marker = None  # marker currently graphed
         self.show_trajectory = False
         self.show_relative_trajectory = False
+        self._cached_traj_pts = None  # cached trajectory polyline points
+        self._cached_traj_marker = None
+        self._cached_rel_traj_pts = None
+        self._cached_rel_traj_marker = None
 
         # Build UI
         self._build_ui()
@@ -660,7 +841,7 @@ class BiomechanicsGUI(QMainWindow):
         """
 
     # ── Playback ──
-    DISPLAY_FPS = 30  # fixed screen refresh rate
+    DISPLAY_FPS = 60  # fixed screen refresh rate
 
     def _get_frame_skip(self):
         """Calculate how many frames to advance per display tick."""
@@ -687,10 +868,11 @@ class BiomechanicsGUI(QMainWindow):
         idx = self.current_frame_idx + skip
         if idx >= self.total_frames:
             idx = 0
+        self._playback_tick += 1
         self.slider.blockSignals(True)
         self.slider.setValue(idx)
         self.slider.blockSignals(False)
-        self._show_frame(idx)
+        self._show_frame(idx, is_playing=True)
 
     def _slider_changed(self, value):
         self._show_frame(value)
@@ -705,67 +887,62 @@ class BiomechanicsGUI(QMainWindow):
         self.btn_rel_trajectory.setText("Hide Relative Traj." if checked else "Show Relative Trajectory")
         self._show_frame(self.current_frame_idx)
 
-    def _show_frame(self, idx):
-        """Read and display a video frame with overlaid markers."""
-        self.current_frame_idx = idx
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = self.cap.read()
-        if not ret:
+    def _build_trajectory_cache(self):
+        """Pre-compute trajectory polyline points for the selected marker."""
+        m = self.selected_marker
+        if not m or m not in self._marker_xy:
+            self._cached_traj_pts = None
+            self._cached_traj_marker = None
+            self._cached_rel_traj_pts = None
+            self._cached_rel_traj_marker = None
             return
+        self._cached_traj_marker = m
+        self._cached_traj_pts = self._marker_xy[m]  # (N,2) int32
+        # Also build relative trajectory (marker - Hip)
+        if "Hip" in self._marker_xy:
+            hip_xy = self._marker_xy["Hip"]
+            self._cached_rel_traj_pts = self._marker_xy[m] - hip_xy  # relative offsets
+            self._cached_rel_traj_marker = m
+        else:
+            self._cached_rel_traj_pts = None
+            self._cached_rel_traj_marker = None
 
-        # Get marker positions for this frame (pixel space)
-        marker_pos = {}
+    def _show_frame(self, idx, is_playing=False):
+        """Display a video frame with overlaid markers. Optimized for 60fps."""
+        self.current_frame_idx = idx
+        if idx >= len(self.frames):
+            return
+        frame = self.frames[idx].copy()  # copy from pre-loaded array
+
         trc_idx = min(idx, self.n_frames_px - 1)
+
+        # Build marker_pos dict from pre-computed numpy arrays
+        marker_pos = {}
         for m in self.marker_names:
-            x = self.pos_px[m]["x"][trc_idx]
-            y = self.pos_px[m]["y"][trc_idx]
-            marker_pos[m] = (x, y)
+            xy = self._marker_xy[m][trc_idx]
+            marker_pos[m] = (xy[0], xy[1])
 
-        # Draw trajectory trail for selected marker
-        if self.show_trajectory and self.selected_marker and self.selected_marker in self.pos_px:
-            m = self.selected_marker
-            color_hex = MARKER_COLORS.get(m, "#ffffff")
-            cr = int(color_hex[1:3], 16)
-            cg = int(color_hex[3:5], 16)
-            cb = int(color_hex[5:7], 16)
-            overlay = frame.copy()
-            for i in range(1, trc_idx + 1):
-                x1 = self.pos_px[m]["x"][i - 1]
-                y1 = self.pos_px[m]["y"][i - 1]
-                x2 = self.pos_px[m]["x"][i]
-                y2 = self.pos_px[m]["y"][i]
-                if x1 == 0 or y1 == 0 or x2 == 0 or y2 == 0:
-                    continue
-                alpha = 0.3 + 0.7 * (i / max(trc_idx, 1))
-                cv2.line(overlay, (int(x1), int(y1)), (int(x2), int(y2)),
-                         (int(cb * alpha), int(cg * alpha), int(cr * alpha)), 2)
-            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        # Draw trajectory using cv2.polylines (fast, no Python loop)
+        if self.show_trajectory and self._cached_traj_pts is not None:
+            pts = self._cached_traj_pts[:trc_idx + 1]
+            # Filter out zero points
+            valid = (pts[:, 0] != 0) & (pts[:, 1] != 0)
+            if valid.sum() > 1:
+                color_hex = MARKER_COLORS.get(self.selected_marker, "#ffffff")
+                cr, cg, cb = int(color_hex[1:3], 16), int(color_hex[3:5], 16), int(color_hex[5:7], 16)
+                cv2.polylines(frame, [pts[valid]], isClosed=False,
+                              color=(cb, cg, cr), thickness=2, lineType=cv2.LINE_AA)
 
-        # Draw relative trajectory (relative to Hip)
-        if self.show_relative_trajectory and self.selected_marker and self.selected_marker in self.pos_px and "Hip" in self.pos_px:
-            m = self.selected_marker
-            color_hex = MARKER_COLORS.get(m, "#ffffff")
-            cr = int(color_hex[1:3], 16)
-            cg = int(color_hex[3:5], 16)
-            cb = int(color_hex[5:7], 16)
-            # Current Hip position as anchor point for drawing
-            hip_cx = self.pos_px["Hip"]["x"][trc_idx]
-            hip_cy = self.pos_px["Hip"]["y"][trc_idx]
-            overlay = frame.copy()
-            for i in range(1, trc_idx + 1):
-                # Relative position = marker - hip at each frame, drawn at current hip
-                dx1 = self.pos_px[m]["x"][i-1] - self.pos_px["Hip"]["x"][i-1]
-                dy1 = self.pos_px[m]["y"][i-1] - self.pos_px["Hip"]["y"][i-1]
-                dx2 = self.pos_px[m]["x"][i] - self.pos_px["Hip"]["x"][i]
-                dy2 = self.pos_px[m]["y"][i] - self.pos_px["Hip"]["y"][i]
-                rx1, ry1 = hip_cx + dx1, hip_cy + dy1
-                rx2, ry2 = hip_cx + dx2, hip_cy + dy2
-                if rx1 == 0 or ry1 == 0 or rx2 == 0 or ry2 == 0:
-                    continue
-                alpha = 0.3 + 0.7 * (i / max(trc_idx, 1))
-                cv2.line(overlay, (int(rx1), int(ry1)), (int(rx2), int(ry2)),
-                         (int(cb * alpha), int(cg * alpha), int(cr * alpha)), 2)
-            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        # Draw relative trajectory using polylines
+        if self.show_relative_trajectory and self._cached_rel_traj_pts is not None and "Hip" in self._marker_xy:
+            hip_now = self._marker_xy["Hip"][trc_idx]  # current Hip position
+            rel_pts = self._cached_rel_traj_pts[:trc_idx + 1] + hip_now  # offset to current hip
+            valid = (rel_pts[:, 0] != 0) & (rel_pts[:, 1] != 0)
+            if valid.sum() > 1:
+                color_hex = MARKER_COLORS.get(self.selected_marker, "#ffffff")
+                cr, cg, cb = int(color_hex[1:3], 16), int(color_hex[3:5], 16), int(color_hex[5:7], 16)
+                cv2.polylines(frame, [rel_pts[valid]], isClosed=False,
+                              color=(cb, cg, cr), thickness=2, lineType=cv2.LINE_AA)
 
         # Build angle info for the selected marker's joint
         angle_info = None
@@ -799,12 +976,13 @@ class BiomechanicsGUI(QMainWindow):
         time_val = self.time_m[min(idx, self.n_frames_m - 1)] if idx < self.n_frames_m else 0
         self.lbl_frame.setText(f"F {idx}/{self.total_frames-1}  |  {time_val:.3f}s")
 
-        # Update kinematics data if a marker is selected
-        if self.selected_marker:
+        # During playback, throttle expensive updates (every 6th tick)
+        should_update_extras = (not is_playing) or (self._playback_tick % 6 == 0)
+
+        if self.selected_marker and should_update_extras:
             self._update_kinematics_display(idx)
 
-        # Update graph vline
-        if self.graph_marker and self.graph_widget.axes:
+        if self.graph_marker and self.graph_widget.axes and should_update_extras:
             t = self.time_m[min(idx, self.n_frames_m - 1)]
             self.graph_widget.update_vline(t)
 
@@ -815,6 +993,7 @@ class BiomechanicsGUI(QMainWindow):
         self.lbl_selected.setStyleSheet("color: #89b4fa; font-size: 12px; font-weight: bold; padding: 2px;")
         self.btn_trajectory.setEnabled(True)
         self.btn_rel_trajectory.setEnabled(True)
+        self._build_trajectory_cache()
         self._update_kinematics_display(self.current_frame_idx)
         self._generate_graph()
         # Re-render current frame to show selection highlight
@@ -866,8 +1045,6 @@ class BiomechanicsGUI(QMainWindow):
 
     def closeEvent(self, event):
         self.timer.stop()
-        if self.cap:
-            self.cap.release()
         event.accept()
 
 
