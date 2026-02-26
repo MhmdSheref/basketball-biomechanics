@@ -169,6 +169,9 @@ def parse_mot(filepath):
 def compute_kinematics(positions_m, time_arr):
     """Pre-compute velocity and acceleration for all markers in meter space."""
     dt = np.mean(np.diff(time_arr))
+    # Get Hip position for relative calculations
+    hip_x = positions_m.get("Hip", {}).get("x")
+    hip_y = positions_m.get("Hip", {}).get("y")
     kinematics = {}
     for marker, pos in positions_m.items():
         x, y = pos["x"], pos["y"]
@@ -178,11 +181,16 @@ def compute_kinematics(positions_m, time_arr):
         ax = np.gradient(vx, dt)
         ay = np.gradient(vy, dt)
         accel = np.sqrt(ax**2 + ay**2)
-        kinematics[marker] = {
+        entry = {
             "x": x, "y": y,
             "vx": vx, "vy": vy, "speed": speed,
             "ax": ax, "ay": ay, "accel": accel,
         }
+        # Relative position (marker - Hip)
+        if hip_x is not None and hip_y is not None:
+            entry["rel_x"] = x - hip_x
+            entry["rel_y"] = y - hip_y
+        kinematics[marker] = entry
     return kinematics, dt
 
 
@@ -376,7 +384,7 @@ class GraphWidget(FigureCanvas):
         self.customContextMenuRequested.connect(self._show_context_menu)
 
     def plot_kinematics(self, marker_name, time_m, kin, joint_name, ang_kin, time_mot, current_frame):
-        """Plot velocity, speed, acceleration, total accel, angular vel, angular accel."""
+        """Plot position, velocity, acceleration, and angular kinematics."""
         self.fig.clear()
         self.axes = []
         self._vlines = []
@@ -386,64 +394,109 @@ class GraphWidget(FigureCanvas):
 
         current_time = time_m[current_frame] if current_frame < len(time_m) else time_m[-1]
 
-        has_angular = joint_name and joint_name in ang_kin
-        n_plots = 4 if has_angular else 2
+        # Check if angular data exists AND is non-zero
+        has_angular = False
+        if joint_name and joint_name in ang_kin:
+            omega = ang_kin[joint_name]["omega"]
+            if np.any(omega != 0):
+                has_angular = True
 
-        # Plot 1: Velocity (Vx, Vy, Total Speed)
-        ax1 = self.fig.add_subplot(n_plots, 1, 1)
-        ax1.plot(time_m, kin["vx"], color="#89b4fa", alpha=0.9, linewidth=1.0, label="Vx")
-        ax1.plot(time_m, kin["vy"], color="#a6e3a1", alpha=0.9, linewidth=1.0, label="Vy")
-        ax1.plot(time_m, kin["speed"], color="#94e2d5", alpha=0.9, linewidth=1.4, label="Speed", linestyle="-")
-        vl = ax1.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
+        has_rel_pos = "rel_x" in kin and "rel_y" in kin
+        n_plots = 3  # position, velocity, acceleration
+        if has_rel_pos:
+            n_plots += 1  # relative position
+        if has_angular:
+            n_plots += 2  # angular vel + angular accel
+
+        plot_idx = 1
+
+        # Plot: Absolute Position (X, Y)
+        ax_pos = self.fig.add_subplot(n_plots, 1, plot_idx)
+        ax_pos.plot(time_m, kin["x"], color="#89b4fa", alpha=0.9, linewidth=1.0, label="X")
+        ax_pos.plot(time_m, kin["y"], color="#a6e3a1", alpha=0.9, linewidth=1.0, label="Y")
+        vl = ax_pos.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
         self._vlines.append(vl)
-        ax1.set_ylabel("Velocity (m/s)", fontsize=8)
-        ax1.set_title(f"{marker_name} - Velocity", fontsize=9, color="white", pad=4)
-        ax1.legend(fontsize=7, loc="upper right", framealpha=0.3)
-        self._style_axis(ax1)
+        ax_pos.set_ylabel("Position (m)", fontsize=8)
+        ax_pos.set_title(f"{marker_name} - Position", fontsize=9, color="white", pad=4)
+        ax_pos.legend(fontsize=7, loc="upper right", framealpha=0.3)
+        self._style_axis(ax_pos)
+        self._plot_data["Position"] = {"Time (s)": time_m, "X (m)": kin["x"], "Y (m)": kin["y"]}
+        all_axes = [ax_pos]
+        plot_idx += 1
+
+        # Plot: Relative Position (to Hip)
+        if has_rel_pos:
+            ax_rel = self.fig.add_subplot(n_plots, 1, plot_idx)
+            ax_rel.plot(time_m, kin["rel_x"], color="#f5c2e7", alpha=0.9, linewidth=1.0, label="Rel X")
+            ax_rel.plot(time_m, kin["rel_y"], color="#cba6f7", alpha=0.9, linewidth=1.0, label="Rel Y")
+            vl = ax_rel.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
+            self._vlines.append(vl)
+            ax_rel.set_ylabel("Rel Pos (m)", fontsize=8)
+            ax_rel.set_title(f"{marker_name} - Position Relative to Hip", fontsize=9, color="white", pad=4)
+            ax_rel.legend(fontsize=7, loc="upper right", framealpha=0.3)
+            self._style_axis(ax_rel)
+            self._plot_data["Relative Position"] = {"Time (s)": time_m, "Rel X (m)": kin["rel_x"], "Rel Y (m)": kin["rel_y"]}
+            all_axes.append(ax_rel)
+            plot_idx += 1
+
+        # Plot: Velocity (Vx, Vy, Speed)
+        ax_v = self.fig.add_subplot(n_plots, 1, plot_idx)
+        ax_v.plot(time_m, kin["vx"], color="#89b4fa", alpha=0.9, linewidth=1.0, label="Vx")
+        ax_v.plot(time_m, kin["vy"], color="#a6e3a1", alpha=0.9, linewidth=1.0, label="Vy")
+        ax_v.plot(time_m, kin["speed"], color="#94e2d5", alpha=0.9, linewidth=1.4, label="Speed")
+        vl = ax_v.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
+        self._vlines.append(vl)
+        ax_v.set_ylabel("Velocity (m/s)", fontsize=8)
+        ax_v.set_title(f"{marker_name} - Velocity", fontsize=9, color="white", pad=4)
+        ax_v.legend(fontsize=7, loc="upper right", framealpha=0.3)
+        self._style_axis(ax_v)
         self._plot_data["Velocity"] = {"Time (s)": time_m, "Vx (m/s)": kin["vx"], "Vy (m/s)": kin["vy"], "Speed (m/s)": kin["speed"]}
+        all_axes.append(ax_v)
+        plot_idx += 1
 
-        # Plot 2: Acceleration (Ax, Ay, Total Accel)
-        ax2 = self.fig.add_subplot(n_plots, 1, 2)
-        ax2.plot(time_m, kin["ax"], color="#f38ba8", alpha=0.9, linewidth=1.0, label="Ax")
-        ax2.plot(time_m, kin["ay"], color="#fab387", alpha=0.9, linewidth=1.0, label="Ay")
-        ax2.plot(time_m, kin["accel"], color="#eba0ac", alpha=0.9, linewidth=1.4, label="Total", linestyle="-")
-        vl = ax2.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
+        # Plot: Acceleration (Ax, Ay, Total)
+        ax_a = self.fig.add_subplot(n_plots, 1, plot_idx)
+        ax_a.plot(time_m, kin["ax"], color="#f38ba8", alpha=0.9, linewidth=1.0, label="Ax")
+        ax_a.plot(time_m, kin["ay"], color="#fab387", alpha=0.9, linewidth=1.0, label="Ay")
+        ax_a.plot(time_m, kin["accel"], color="#eba0ac", alpha=0.9, linewidth=1.4, label="Total")
+        vl = ax_a.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
         self._vlines.append(vl)
-        ax2.set_ylabel("Accel (m/s²)", fontsize=8)
-        ax2.set_title(f"{marker_name} - Acceleration", fontsize=9, color="white", pad=4)
-        ax2.legend(fontsize=7, loc="upper right", framealpha=0.3)
-        self._style_axis(ax2)
+        ax_a.set_ylabel("Accel (m/s²)", fontsize=8)
+        ax_a.set_title(f"{marker_name} - Acceleration", fontsize=9, color="white", pad=4)
+        ax_a.legend(fontsize=7, loc="upper right", framealpha=0.3)
+        self._style_axis(ax_a)
         self._plot_data["Acceleration"] = {"Time (s)": time_m, "Ax (m/s²)": kin["ax"], "Ay (m/s²)": kin["ay"], "Total Accel (m/s²)": kin["accel"]}
-
-        all_axes = [ax1, ax2]
+        all_axes.append(ax_a)
+        plot_idx += 1
 
         if has_angular:
             n = min(len(time_mot), len(ang_kin[joint_name]["omega"]))
 
-            # Plot 3: Angular Velocity
-            ax3 = self.fig.add_subplot(n_plots, 1, 3)
-            ax3.plot(time_mot[:n], ang_kin[joint_name]["omega"][:n],
+            # Plot: Angular Velocity
+            ax_av = self.fig.add_subplot(n_plots, 1, plot_idx)
+            ax_av.plot(time_mot[:n], ang_kin[joint_name]["omega"][:n],
                      color="#cba6f7", alpha=0.9, linewidth=1.2)
-            vl = ax3.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
+            vl = ax_av.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
             self._vlines.append(vl)
-            ax3.set_ylabel("Ang Vel (deg/s)", fontsize=8)
-            ax3.set_title(f"{joint_name.title()} - Angular Velocity", fontsize=9, color="white", pad=4)
-            self._style_axis(ax3)
-            all_axes.append(ax3)
+            ax_av.set_ylabel("Ang Vel (deg/s)", fontsize=8)
+            ax_av.set_title(f"{joint_name.title()} - Angular Velocity", fontsize=9, color="white", pad=4)
+            self._style_axis(ax_av)
+            all_axes.append(ax_av)
             self._plot_data["Angular Velocity"] = {
                 "Time (s)": time_mot[:n], "Angular Velocity (deg/s)": ang_kin[joint_name]["omega"][:n]
             }
+            plot_idx += 1
 
-            # Plot 4: Angular Acceleration
-            ax4 = self.fig.add_subplot(n_plots, 1, 4)
-            ax4.plot(time_mot[:n], ang_kin[joint_name]["alpha"][:n],
+            # Plot: Angular Acceleration
+            ax_aa = self.fig.add_subplot(n_plots, 1, plot_idx)
+            ax_aa.plot(time_mot[:n], ang_kin[joint_name]["alpha"][:n],
                      color="#f9e2af", alpha=0.9, linewidth=1.2)
-            vl = ax4.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
+            vl = ax_aa.axvline(current_time, color="white", linestyle="--", alpha=0.7, linewidth=1)
             self._vlines.append(vl)
-            ax4.set_ylabel("Ang Accel (deg/s²)", fontsize=8)
-            ax4.set_title(f"{joint_name.title()} - Angular Acceleration", fontsize=9, color="white", pad=4)
-            self._style_axis(ax4)
-            all_axes.append(ax4)
+            ax_aa.set_ylabel("Ang Accel (deg/s²)", fontsize=8)
+            ax_aa.set_title(f"{joint_name.title()} - Angular Acceleration", fontsize=9, color="white", pad=4)
+            self._style_axis(ax_aa)
+            all_axes.append(ax_aa)
             self._plot_data["Angular Acceleration"] = {
                 "Time (s)": time_mot[:n], "Angular Acceleration (deg/s²)": ang_kin[joint_name]["alpha"][:n]
             }
